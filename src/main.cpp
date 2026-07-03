@@ -240,7 +240,7 @@ void status_display_task()
 	printk("Vdc %5.2f V, ", (double) V_dc);
 	printk("Idc %4.2f A, ", (double) I_dc);
 	printk("| ");
-	printk("M∠ i%d, s%d %s", motor_angle_index, motor_angle_sector, SECTOR_STRING[motor_angle_sector]);
+	printk("M∠ i%d, s%d %s", motor_angle_index, motor_angle_sector, motor_angle_sector>=0 ? SECTOR_STRING[motor_angle_sector] : "X");
 	printk("\n");
 	task.suspendBackgroundMs(200);
 }

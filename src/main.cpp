@@ -132,8 +132,8 @@ void setup_routine()
 
 	/* Set the high switch convention for all legs */
 	shield.power.initBuck(ALL);
-	shield.power.setDutyCycleMin(ALL, 0.0);
-	shield.power.setDutyCycleMax(ALL, 1.0);
+	shield.power.setDutyCycleMin(ALL, 0.05);
+	shield.power.setDutyCycleMax(ALL, 0.95);
 
 	/* GPIO pin (e.g. for external scope trigger) */
 	spin.gpio.configurePin(PGPIO, OUTPUT);

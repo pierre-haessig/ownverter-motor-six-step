@@ -64,13 +64,14 @@ float32_t Vi_ref = 0; // Inverter voltage amplitude reference (V)
 const float32_t VI_STEP = 0.1; // Inverter voltage increment/decrement step (V)
 
 static uint8_t leg_state_index = 0;
-const uint8_t leg_state_a[] = {1, 1, 0, 0, 0, 1}; // state of leg a function of leg_state_index in 0...5
-const uint8_t leg_state_b[] = {0, 1, 1, 1, 0, 0}; // state of leg b function of leg_state_index in 0...5
-const uint8_t leg_state_c[] = {0, 0, 0, 1, 1, 1}; // state of leg c function of leg_state_index in 0...5
+const int8_t leg_state_a[] = {+1,  0, -1, -1,  0, +1}; // state of leg a function of leg_state_index in 0...5
+const int8_t leg_state_b[] = { 0, +1, +1,  0, -1, -1}; // state of leg b function of leg_state_index in 0...5
+const int8_t leg_state_c[] = {-1, -1,  0, +1, +1,  0}; // state of leg c function of leg_state_index in 0...5
 
 /* BOARD POWER CONVERSION STATE VARIABLES */
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
 static float32_t duty_a, duty_b, duty_c; // three-phase PWM duty cycle (phases a, b, c)
+static bool auto_spin = false; // Autopilot for leg state commutation based on Hall angles
 
 const uint8_t PGPIO=41; // Pin used as GPIO (e.g. for external scope trigger, Pin 41=PB10)
 
@@ -189,6 +190,10 @@ void user_interface_task()
 		printk("Power mode request\n");
 		mode = POWER_MODE;
 		break;
+	case 'a':
+		auto_spin = !auto_spin;
+		printk("Toggle auto_spin %s\n", auto_spin ? "ON" : "OFF");
+		break;
 	case 'u':
 		Vi_ref += VI_STEP;
 		printk("Amplitude UP (%.1f V) \n", (double) Vi_ref);
@@ -228,10 +233,11 @@ void status_display_task()
 		// Display state:
 		printk("POW: ");
 	}
+	printk("spin %s, ", auto_spin ? "Aut" : "Man");
 	// Display duty cycle reference and frequency:
 	printk("a=%4.1fV, ", (double) Vi_ref);
-	printk("p=%d (%4.1f %4.1f %4.1f)", leg_state_index,
-		  (double) (duty_a*100), (double) (duty_b*100), (double) (duty_c*100));
+	printk("p=%d (%d,%d,%d)", leg_state_index,
+		  leg_state_a[leg_state_index], leg_state_b[leg_state_index], leg_state_c[leg_state_index]);
 	printk("| ");
 	// Display measurements
 	printk("Vdc %5.2f V, ", (double) V_dc);
@@ -331,13 +337,12 @@ inline void compute_duties()
 	else {
 		inv_V_dc_filt = 1.0F / V_dc_filt;
 	}
-
-	bool sa = leg_state_a[leg_state_index];
-	bool sb = leg_state_b[leg_state_index];
-	bool sc = leg_state_c[leg_state_index];
-	duty_a = voltage_to_duty(sa ? Vi_ref : -Vi_ref, inv_V_dc_filt);
-	duty_b = voltage_to_duty(sb ? Vi_ref : -Vi_ref, inv_V_dc_filt);
-	duty_c = voltage_to_duty(sc ? Vi_ref : -Vi_ref, inv_V_dc_filt);
+	if (auto_spin) {
+		leg_state_index = motor_angle_sector;
+	}
+	duty_a = voltage_to_duty(Vi_ref * leg_state_a[leg_state_index], inv_V_dc_filt);
+	duty_b = voltage_to_duty(Vi_ref * leg_state_b[leg_state_index], inv_V_dc_filt);
+	duty_c = voltage_to_duty(Vi_ref * leg_state_c[leg_state_index], inv_V_dc_filt);
 }
 
 /* Apply legs duty cycles to the PWM generators */

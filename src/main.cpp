@@ -59,14 +59,14 @@ void read_motor_position();
 static const float32_t T_control = 100e-6F; // Control task period (s)
 static const uint32_t T_control_micro = (uint32_t)(T_control * 1.e6F); // Control task period (integer number of µs)
 
-/* SINUSOIDAL SIGNAL GENERATION VARIABLES */
-static float32_t v_freq = 10.0; // inverter voltage frequency (Hz)
-static float32_t v_angle = 0.0; // inverter voltage angle (rad)
-const float32_t FREQ_INCREMENT = 10.0; // frequency up or down increment (Hz)
-const float32_t KEMF = 0.040184; // Motor emf constant (V/Hz), expressed as phase-to-neutral amplitude
-float32_t Vi_ref_delta = 1.0; // Inverter voltage reference supplement (added to V/f control) (V)
-float32_t Vi_ref = KEMF*v_freq + Vi_ref_delta; // Inverter voltage amplitude reference (V)
+/* SQUARE SIGNAL GENERATION VARIABLES */
+float32_t Vi_ref = 0; // Inverter voltage amplitude reference (V)
 const float32_t VI_STEP = 0.1; // Inverter voltage increment/decrement step (V)
+
+static uint8_t leg_state_index = 0;
+const uint8_t leg_state_a[] = {1, 1, 0, 0, 0, 1}; // state of leg a function of leg_state_index in 0...5
+const uint8_t leg_state_b[] = {0, 1, 1, 1, 0, 0}; // state of leg b function of leg_state_index in 0...5
+const uint8_t leg_state_c[] = {0, 0, 0, 1, 1, 1}; // state of leg c function of leg_state_index in 0...5
 
 /* BOARD POWER CONVERSION STATE VARIABLES */
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
@@ -102,10 +102,6 @@ static float meas_data; // Temporary storage for measured value
 static LowPassFirstOrderFilter vdc_filter = controlLibFactory.lowpassfilter(T_control, 5.0e-3F);
 static float32_t V_dc_filt; // DC bus voltage, lowpass filtered (V)
 static float32_t inv_V_dc_filt; // 1/Vdc, with a 1/V_DC_MIN bound
-
-// Frequency smoothing filter
-static LowPassFirstOrderFilter freq_filter = controlLibFactory.lowpassfilter(T_control, 0.10F);
-static float32_t v_freq_smooth = v_freq; // inverter voltage frequency, smoothed (low pass) (Hz)
 
 // Motor position (Hall effect sensor)
 #define HALL1 PC6 // Hall sensor 1 pin
@@ -177,10 +173,10 @@ void user_interface_task()
 				"|     ------- MENU ---------                   |\n"
 				"|     press i   : idle mode                    |\n"
 				"|     press p   : power mode                   |\n"
-				"|     press u   : voltage amplitude delta UP   |\n"
-				"|     press j   : voltage amplitude delta DOWN |\n"
-				"|     press f   : frequency UP                 |\n"
-				"|     press v   : frequency DOWN               |\n"
+				"|     press u   : voltage amplitude UP         |\n"
+				"|     press j   : voltage amplitude DOWN       |\n"
+				"|     press f   : position state UP            |\n"
+				"|     press v   : position state  DOWN         |\n"
 				"|______________________________________________|\n\n");
 
 		/* ------------------------------------------------------ */
@@ -194,20 +190,20 @@ void user_interface_task()
 		mode = POWER_MODE;
 		break;
 	case 'u':
-		Vi_ref_delta += VI_STEP;
-		printk("Amplitude delta UP (%.1f V) \n", (double) Vi_ref_delta);
+		Vi_ref += VI_STEP;
+		printk("Amplitude UP (%.1f V) \n", (double) Vi_ref);
 		break;
 	case 'j':
-		Vi_ref_delta -= VI_STEP;
-		printk("Amplitude delta DOWN (%.1f V) \n", (double) Vi_ref_delta);
+		Vi_ref -= VI_STEP;
+		printk("Amplitude DOWN (%.1f V) \n", (double) Vi_ref);
 		break;
 	case 'f':
-		v_freq += FREQ_INCREMENT;
-		printk("Frequency UP (%.2f Hz) \n", (double) v_freq);
+		leg_state_index = (leg_state_index + 1) % 6;
+		printk("Leg state UP (p%d) \n", leg_state_index);
 		break;
 	case 'v':
-		v_freq -= FREQ_INCREMENT;
-		printk("Frequency DOWN (%.2f Hz) \n", (double) v_freq);
+		leg_state_index = (leg_state_index + 5) % 6;
+		printk("Leg state DOWN (p%d) \n", leg_state_index);
 		break;
 	default:
 		break;
@@ -233,8 +229,9 @@ void status_display_task()
 		printk("POW: ");
 	}
 	// Display duty cycle reference and frequency:
-	printk("a=%4.1fV (Δ=%3.1fV) ", (double) Vi_ref, (double) Vi_ref_delta);
-	printk("@%.0f Hz ", (double) v_freq_smooth);
+	printk("a=%4.1fV, ", (double) Vi_ref);
+	printk("p=%d (%4.1f %4.1f %4.1f)", leg_state_index,
+		  (double) (duty_a*100), (double) (duty_b*100), (double) (duty_c*100));
 	printk("| ");
 	// Display measurements
 	printk("Vdc %5.2f V, ", (double) V_dc);
@@ -326,10 +323,6 @@ inline float32_t voltage_to_duty(float32_t Vleg, float32_t inverse_Vdc)
 /* Compute sinusoidal duty cycles duty_abc from Vi_ref and V_high_filtered */
 inline void compute_duties()
 {
-	// Update inverter phase (∫ω(t).dt, computed with Euler approximation, modulo 2π)
-	float32_t omega = 2*PI*v_freq_smooth; // frequency conversion (Hz -> rad/s): ω = 2π.f
-	v_angle = ot_modulo_2pi(v_angle + omega*T_control);
-
 	const float32_t V_DC_MIN = 10; // min DC voltage
 	// Invert Vdc with a bound
 	if (V_dc_filt > V_DC_MIN ) {
@@ -338,11 +331,13 @@ inline void compute_duties()
 	else {
 		inv_V_dc_filt = 1.0F / V_dc_filt;
 	}
-	// Update inverter amplitude using V/f control:
-	Vi_ref = KEMF*v_freq_smooth + Vi_ref_delta;
-	duty_a = voltage_to_duty(Vi_ref * ot_sin(v_angle), inv_V_dc_filt);
-	duty_b = voltage_to_duty(Vi_ref * ot_sin(v_angle - 2.0/3.0*PI), inv_V_dc_filt);
-	duty_c = voltage_to_duty(Vi_ref * ot_sin(v_angle - 4.0/3.0*PI), inv_V_dc_filt);
+
+	bool sa = leg_state_a[leg_state_index];
+	bool sb = leg_state_b[leg_state_index];
+	bool sc = leg_state_c[leg_state_index];
+	duty_a = voltage_to_duty(sa ? Vi_ref : -Vi_ref, inv_V_dc_filt);
+	duty_b = voltage_to_duty(sb ? Vi_ref : -Vi_ref, inv_V_dc_filt);
+	duty_c = voltage_to_duty(sc ? Vi_ref : -Vi_ref, inv_V_dc_filt);
 }
 
 /* Apply legs duty cycles to the PWM generators */
@@ -367,8 +362,6 @@ void control_task()
 	/* Retrieve sensor values */
 	read_measurements();
 	read_motor_position();
-	// Smooth frequency reference
-	v_freq_smooth = freq_filter.calculateWithReturn(v_freq);
 
 	/* Compute sinusoidal duty cycles*/
 	compute_duties();

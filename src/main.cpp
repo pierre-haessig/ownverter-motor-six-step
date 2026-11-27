@@ -72,10 +72,10 @@ const float32_t VI_STEP = 0.5; // Inverter voltage increment/decrement step (V)
 
 static bool auto_commute = false; // Automatically commute leg states based on Hall sensor sectors
 
-// Auto commute supply maps:
-const int8_t supply_map_a[] = {+1,  0, -1, -1,  0, +1}; // supply state of leg a, function of motor_angle_sector
-const int8_t supply_map_b[] = { 0, +1, +1,  0, -1, -1}; // supply state of leg b, function of motor_angle_sector
-const int8_t supply_map_c[] = {-1, -1,  0, +1, +1,  0}; // supply state of leg c, function of motor_angle_sector
+// Auto commute supply maps: TO BE MODIFIED! (to have auto_commute=true work)
+const int8_t supply_map_a[] = {+1, +1, +1, +1, +1, +1}; // supply state of leg a, function of motor_angle_sector
+const int8_t supply_map_b[] = { 0,  0,  0,  0,  0,  0}; // supply state of leg b, function of motor_angle_sector
+const int8_t supply_map_c[] = {-1, -1, -1, -1, -1, -1}; // supply state of leg c, function of motor_angle_sector
 
 /* Possible modes for the OwnTech board */
 enum serial_interface_menu_mode
@@ -115,7 +115,8 @@ static uint8_t Hall2_value; // Hall sensor 2 value
 static uint8_t Hall3_value; // Hall sensor 3 value
 
 static uint8_t motor_angle_index; // Hall sensors index value (bitwise concatenation H1*2^0 + H2*2^1 + H3*2^2)
-const int8_t HALL_SECTOR[] = {-1, 5, 1, 0, 3, 4, 2, -1}; // index to sector conversion look-up-table (1st and last value illegal)
+// HALL_SECTOR mapping TO BE MODIFIED!
+const int8_t HALL_SECTOR[] = {-1, 0, 1, 2, 3, 4, 5, -1}; // index to sector conversion look-up-table (1st and last value illegal)
 static int8_t motor_angle_sector = HALL_SECTOR[motor_angle_index]; // motor angle, expressed as a 60° sector in 0,...,5
 const char* SECTOR_STRING[] = {"→","↗","↖","←","↙","↘"};
 
@@ -251,7 +252,10 @@ void status_display_task()
 	printk("Vdc %5.2f V, ", (double) V_dc);
 	printk("Idc %4.2f A, ", (double) I_dc);
 	printk("| ");
-	printk("M∠ i%d, s%d %s", motor_angle_index, motor_angle_sector, motor_angle_sector>=0 ? SECTOR_STRING[motor_angle_sector] : "X");
+	// Hall effect sensor:
+	printk("M∠  H321%d%d%d = i%d, ", Hall3_value, Hall2_value, Hall1_value, motor_angle_index);
+	printk("s%d %s", motor_angle_sector,
+		   motor_angle_sector>=0 ? SECTOR_STRING[motor_angle_sector] : "X");
 	printk("\n");
 	task.suspendBackgroundMs(200);
 }

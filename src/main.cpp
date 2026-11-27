@@ -19,7 +19,7 @@
 
 /**
  * @brief  Application for inverter driving a brushless motor,
- *         with an open loop V/f control,
+ *         with a Six-Step Commutation,
  *         using the three-phase OwnVerter board.
  *
  * @author Pierre Haessig <pierre.haessig@centralesupelec.fr>
@@ -59,21 +59,23 @@ void read_motor_position();
 static const float32_t T_control = 100e-6F; // Control task period (s)
 static const uint32_t T_control_micro = (uint32_t)(T_control * 1.e6F); // Control task period (integer number of µs)
 
-/* SQUARE SIGNAL GENERATION VARIABLES */
-float32_t Vi_ref = 0; // Inverter voltage amplitude reference (V)
-const float32_t VI_STEP = 0.1; // Inverter voltage increment/decrement step (V)
-
-static uint8_t leg_state_index = 0;
-const int8_t leg_state_a[] = {+1,  0, -1, -1,  0, +1}; // state of leg a function of leg_state_index in 0...5
-const int8_t leg_state_b[] = { 0, +1, +1,  0, -1, -1}; // state of leg b function of leg_state_index in 0...5
-const int8_t leg_state_c[] = {-1, -1,  0, +1, +1,  0}; // state of leg c function of leg_state_index in 0...5
-
 /* BOARD POWER CONVERSION STATE VARIABLES */
 static bool power_enable = false; // Power conversion state of the leg (PWM activation state)
 static float32_t duty_a, duty_b, duty_c; // three-phase PWM duty cycle (phases a, b, c)
-static bool auto_spin = false; // Autopilot for leg state commutation based on Hall angles
+static int8_t supply_a, supply_b, supply_c; // supply states of leg a, b, c
 
 const uint8_t PGPIO=41; // Pin used as GPIO (e.g. for external scope trigger, Pin 41=PB10)
+
+/* INVERTER SIX-STEP SUPPLY VARIABLES */
+float32_t Vi_ref = 0; // Inverter voltage amplitude reference (V)
+const float32_t VI_STEP = 0.5; // Inverter voltage increment/decrement step (V)
+
+static bool auto_commute = false; // Automatically commute leg states based on Hall sensor sectors
+
+// Auto commute supply maps:
+const int8_t supply_map_a[] = {+1,  0, -1, -1,  0, +1}; // supply state of leg a, function of motor_angle_sector
+const int8_t supply_map_b[] = { 0, +1, +1,  0, -1, -1}; // supply state of leg b, function of motor_angle_sector
+const int8_t supply_map_c[] = {-1, -1,  0, +1, +1,  0}; // supply state of leg c, function of motor_angle_sector
 
 /* Possible modes for the OwnTech board */
 enum serial_interface_menu_mode
@@ -104,13 +106,14 @@ static LowPassFirstOrderFilter vdc_filter = controlLibFactory.lowpassfilter(T_co
 static float32_t V_dc_filt; // DC bus voltage, lowpass filtered (V)
 static float32_t inv_V_dc_filt; // 1/Vdc, with a 1/V_DC_MIN bound
 
-// Motor position (Hall effect sensor)
+// Motor rotor position (Hall effect sensor)
 #define HALL1 PC6 // Hall sensor 1 pin
 #define HALL2 PC7 // Hall sensor 2 pin
 #define HALL3 PD2 // Hall sensor 3 pin
 static uint8_t Hall1_value; // Hall sensor 1 value
 static uint8_t Hall2_value; // Hall sensor 2 value
 static uint8_t Hall3_value; // Hall sensor 3 value
+
 static uint8_t motor_angle_index; // Hall sensors index value (bitwise concatenation H1*2^0 + H2*2^1 + H3*2^2)
 const int8_t HALL_SECTOR[] = {-1, 5, 1, 0, 3, 4, 2, -1}; // index to sector conversion look-up-table (1st and last value illegal)
 static int8_t motor_angle_sector = HALL_SECTOR[motor_angle_index]; // motor angle, expressed as a 60° sector in 0,...,5
@@ -174,10 +177,12 @@ void user_interface_task()
 				"|     ------- MENU ---------                   |\n"
 				"|     press i   : idle mode                    |\n"
 				"|     press p   : power mode                   |\n"
+				"|     press a   : toggle auto commutation      |\n"
 				"|     press u   : voltage amplitude UP         |\n"
 				"|     press j   : voltage amplitude DOWN       |\n"
-				"|     press f   : position state UP            |\n"
-				"|     press v   : position state  DOWN         |\n"
+				"|     press 1   : toggle supply of phase a     |\n"
+				"|     press 2   : toggle supply of phase b     |\n"
+				"|     press 3   : toggle supply of phase c     |\n"
 				"|______________________________________________|\n\n");
 
 		/* ------------------------------------------------------ */
@@ -191,8 +196,8 @@ void user_interface_task()
 		mode = POWER_MODE;
 		break;
 	case 'a':
-		auto_spin = !auto_spin;
-		printk("Toggle auto_spin %s\n", auto_spin ? "ON" : "OFF");
+		auto_commute = !auto_commute;
+		printk("Toggle auto_commute %s\n", auto_commute ? "ON" : "OFF");
 		break;
 	case 'u':
 		Vi_ref += VI_STEP;
@@ -202,13 +207,17 @@ void user_interface_task()
 		Vi_ref -= VI_STEP;
 		printk("Amplitude DOWN (%.1f V) \n", (double) Vi_ref);
 		break;
-	case 'f':
-		leg_state_index = (leg_state_index + 1) % 6;
-		printk("Leg state UP (p%d) \n", leg_state_index);
+	case '1':
+		supply_a = -supply_a;
+		printk("Toggle phase a supply state to %d) \n", supply_a);
 		break;
-	case 'v':
-		leg_state_index = (leg_state_index + 5) % 6;
-		printk("Leg state DOWN (p%d) \n", leg_state_index);
+	case '2':
+		supply_b = -supply_b;
+		printk("Toggle phase b supply state to %d) \n", supply_b);
+		break;
+	case '3':
+		supply_c = -supply_c;
+		printk("Toggle phase c supply state to %d) \n", supply_c);
 		break;
 	default:
 		break;
@@ -233,11 +242,10 @@ void status_display_task()
 		// Display state:
 		printk("POW: ");
 	}
-	printk("spin %s, ", auto_spin ? "Aut" : "Man");
+	printk("spin %s, ", auto_commute ? "Aut" : "Man");
 	// Display duty cycle reference and frequency:
-	printk("a=%4.1fV, ", (double) Vi_ref);
-	printk("p=%d (%d,%d,%d)", leg_state_index,
-		  leg_state_a[leg_state_index], leg_state_b[leg_state_index], leg_state_c[leg_state_index]);
+	printk("Vref=%4.1fV, ", (double) Vi_ref);
+	printk("s_abc=(%+d,%+d,%+d)", supply_a, supply_b, supply_c);
 	printk("| ");
 	// Display measurements
 	printk("Vdc %5.2f V, ", (double) V_dc);
@@ -323,10 +331,12 @@ inline float32_t voltage_to_duty(float32_t Vleg, float32_t inverse_Vdc)
 	else {
 		return duty_raw;
 	}
-	// TODO: raise flag if duty saturation.
 }
 
-/* Compute sinusoidal duty cycles duty_abc from Vi_ref and V_high_filtered */
+/* Compute from leg supply state * Vi_ref and V_dc_filt
+
+Optionally commutes leg states based on Hall sensor sectors
+*/
 inline void compute_duties()
 {
 	const float32_t V_DC_MIN = 10; // min DC voltage
@@ -335,14 +345,18 @@ inline void compute_duties()
 		inv_V_dc_filt = 1.0F / V_dc_filt;
 	}
 	else {
-		inv_V_dc_filt = 1.0F / V_dc_filt;
+		inv_V_dc_filt = 1.0F / V_DC_MIN;
 	}
-	if (auto_spin) {
-		leg_state_index = motor_angle_sector;
+
+	if (auto_commute) { // Automatically commute leg states based on Hall sensor sectors
+		supply_a = supply_map_a[motor_angle_sector];
+		supply_b = supply_map_b[motor_angle_sector];
+		supply_c = supply_map_c[motor_angle_sector];
 	}
-	duty_a = voltage_to_duty(Vi_ref * leg_state_a[leg_state_index], inv_V_dc_filt);
-	duty_b = voltage_to_duty(Vi_ref * leg_state_b[leg_state_index], inv_V_dc_filt);
-	duty_c = voltage_to_duty(Vi_ref * leg_state_c[leg_state_index], inv_V_dc_filt);
+
+	duty_a = voltage_to_duty(Vi_ref * supply_a, inv_V_dc_filt);
+	duty_b = voltage_to_duty(Vi_ref * supply_b, inv_V_dc_filt);
+	duty_c = voltage_to_duty(Vi_ref * supply_c, inv_V_dc_filt);
 }
 
 /* Apply legs duty cycles to the PWM generators */
